@@ -1,13 +1,66 @@
+from collections import deque
 import random
+import numpy as np
 import gym
 from gym import spaces
+import tensorflow as tf
+from tensorflow.python.keras import Sequential
+from tensorflow.python.keras.layers import Flatten, Dense
 
-
-# Stałe
 CARDS_PER_AGENT = 6
 NUM_AGENTS = 4
 NUM_EPISODES = 1000
 
+
+def create_q_model():
+    model = Sequential()
+    model.add(Flatten(input_shape=(54,)))  # 52 karty + top_card + requested_value
+    model.add(Dense(128, activation='relu'))
+    model.add(Dense(128, activation='relu'))
+    model.add(Dense(59, activation='linear'))  # 52 akcje kart + 1 dobieranie + 6 wartości (5-10)
+    return model
+
+
+class DQNAgent:
+    def __init__(self, state_size, action_size):
+        self.state_size = state_size
+        self.action_size = action_size
+        self.memory = deque(maxlen=2000)
+        self.gamma = 0.95    # discount rate
+        self.epsilon = 1.0  # exploration rate
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
+        self.learning_rate = 0.001 
+        self.model = create_q_model()
+        self.model.compile(optimizer=tf.python.keras.optimizers.Adam(learning_rate=self.learning_rate), loss='mse')
+
+    def remember(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done))
+
+    def act(self, state, valid_actions):
+        if np.random.rand() <= self.epsilon:
+            return random.choice(valid_actions)
+        act_values = self.model.predict(state)
+        masked_values = [act_values[0][i] if i in valid_actions else -np.inf for i in range(self.action_size)]
+        return np.argmax(masked_values)
+
+    def replay(self, batch_size):
+        minibatch = random.sample(self.memory, batch_size)
+        for state, action, reward, next_state, done in minibatch:
+            target = reward
+            if not done:
+                target = reward + self.gamma * np.amax(self.model.predict(next_state)[0])
+            target_f = self.model.predict(state)
+            target_f[0][action] = target
+            self.model.fit(state, target_f, epochs=1, verbose=0)
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+    def load(self, name):
+        self.model.load_weights(name)
+
+    def save(self, name):
+        self.model.save_weights(name)
 
 class Card:
     def __init__(self, index, value, suit):
@@ -92,16 +145,28 @@ class CardsEffects:
         self.macau_env.current_agent = (self.macau_env.current_agent + 1) % NUM_AGENTS
 
     def value_request(self):
-        #TODO implementacja rządania kart od wybranej przz agenta wartości
-        pass
+        requested_value = self.macau_env.requested_value
+        print(f"Agent {self.macau_env.current_agent} zada wartosci: {requested_value}")
+
+        for i in range(1, NUM_AGENTS):
+            current_agent_id = (self.macau_env.current_agent + i) % NUM_AGENTS
+            agent_hand = self.macau_env.agents[current_agent_id].hand
+            matching_cards = [card for card in agent_hand if card.value == requested_value]
+
+            if matching_cards:
+                card_to_play = matching_cards[0]
+                self.macau_env.discard_pile.discard(card_to_play)
+                agent_hand.remove(card_to_play)
+                print(f"Agent {current_agent_id} zagral karte {card_to_play}")
+            else:
+                drawn_card = self.macau_env.deck.draw_card(self.macau_env.discard_pile)
+                agent_hand.append(drawn_card)
+                print(f"Agent {current_agent_id} dobral karte {drawn_card}")
 
     def make_uniwersal_card(self):
-        #   implementacja niepotrzebna, ponieważ w valid_action_space sprawdzamy czy top_card.value == 'Q'
-        #   jesli tak, to do valid_action będzie dodana każda karta - agent bedzie mógł zagrać dowolną akcje na damę
         pass
 
     def change_suite(self):
-        #TODO wybóor przez agenta kolru
         pass
 
 
@@ -120,14 +185,10 @@ class MacauEnv(gym.Env):
         self.discard_pile = DiscardPile()
         self.agents = [Agent(agent_id, None, None) for agent_id in range(NUM_AGENTS)]
         self.current_agent = 0
+        self.requested_value = None
 
-        self.action_space = spaces.Discrete(53)  # 52 cards + 1 dobranie karty
-        self.observation_space = spaces.Dict({
-            'agent_hand': spaces.MultiDiscrete([52] * 52),
-            'top_card': spaces.MultiDiscrete([52]),
-            'opponent_hand_size': spaces.Discrete(52),
-            'deck_size': spaces.Discrete(52)
-        })
+        self.action_space = spaces.Discrete(59)  # 52 karty + 1 dobranie karty + 6 wartosci (5-10)
+        self.observation_space = spaces.Box(low=0, high=1, shape=(54,), dtype=np.float32)
 
     def reset(self):
         self.deck = Deck()
@@ -135,13 +196,14 @@ class MacauEnv(gym.Env):
         self.discard_pile = DiscardPile()
         self.agents = [Agent(agent_id, self.observation_space, self.action_space) for agent_id in range(NUM_AGENTS)]
         self.current_agent = 0
+        self.requested_value = None
 
         self.deck.deal_cards(self.agents, self.discard_pile)
 
         initial_card = self.deck.draw_card(self.discard_pile)
         self.discard_pile.discard(initial_card)
 
-        print(f"\nKarta początkowa: {initial_card}")
+        print(f"\nKarta poczatkowa: {initial_card}")
 
         return self.get_observation(self.current_agent)
 
@@ -150,7 +212,20 @@ class MacauEnv(gym.Env):
 
         print(f"___________________________________________\nTura agenta {self.current_agent}")
 
-        self.make_action(action, agent)
+        if isinstance(action, tuple):
+            card_action, requested_value_idx = action
+            self.requested_value = requested_value_idx - 48
+            print(f"Agent {self.current_agent} zada wartosci: {self.requested_value}")
+            self.make_action(card_action, agent)
+        elif isinstance(action, list):
+            for idx in action:
+                card = next(c for c in agent.hand if c.index == idx)
+                self.discard_pile.discard(card)
+                agent.hand.remove(card)
+                print(f"Agent {self.current_agent} zagral karte {card}")
+            CardsEffects(self).realize_effects(card)
+        else:
+            self.make_action(action, agent)
 
         done = len(agent.hand) == 0
         reward = 20 if done else 0
@@ -164,25 +239,28 @@ class MacauEnv(gym.Env):
     def get_observation(self, agent_index):
         agent_hand = self.agents[agent_index].hand
         top_card = self.discard_pile.top_card()
+        observation = np.zeros(54)
 
-        return {
-            'agent_hand': [(card.index, card.value, card.suit) for card in agent_hand],
-            'top_card': (top_card.index, top_card.value, top_card.suit) if top_card else None,
-            'opponent_hand_size': len(self.agents[(agent_index + 1) % NUM_AGENTS].hand),
-            'deck_size': len(self.deck.cards)
-        }
+        for card in agent_hand:
+            observation[card.index] = 1
+
+        if top_card:
+            observation[52] = top_card.index
+
+        if self.requested_value:
+            observation[53] = self.requested_value
+
+        return observation
 
     def valid_action_space(self, agent_index):
         agent_hand = self.agents[agent_index].hand
         top_card = self.discard_pile.top_card()
         valid_actions = []
 
-        # Sprawdź pojedyncze karty
         for card in agent_hand:
-            if top_card.value =='Q' or card.value == top_card.value or card.suit == top_card.suit:
-                valid_actions.append([card.index])
+            if top_card.value == 'Q' or card.value == 'Q' or card.value == top_card.value or card.suit == top_card.suit:
+                valid_actions.append(card.index)
 
-        # Sprawdź zestawy kart o tej samej wartości
         value_to_indices = {}
         for card in agent_hand:
             if card.value not in value_to_indices:
@@ -192,60 +270,62 @@ class MacauEnv(gym.Env):
         for indices in value_to_indices.values():
             if len(indices) > 1:
                 first_card = next(c for c in agent_hand if c.index == indices[0])
-                if top_card.value == 'Q' or first_card.value == top_card.value or first_card.suit == top_card.suit:
+                if top_card.value == 'Q' or first_card.value == 'Q' or first_card.value == top_card.value or first_card.suit == top_card.suit:
                     valid_actions.append(indices)
 
-        # Dodaj akcję dobierania karty
+        if any(card.index in [9, 22, 35, 48] and (card.value == top_card.value or card.suit == top_card.suit) for card in agent_hand):
+            for idx in [9, 22, 35, 48]:
+                if idx in [card.index for card in agent_hand]:
+                    for value_idx in range(48, 54):
+                        value_action = (idx, value_idx)
+                        valid_actions.append((idx, value_action))
+
         valid_actions.append("draw")
 
         return valid_actions
 
     def make_action(self, action, agent):
-        if action == "draw":
-            drawn_card = self.deck.draw_card(self.discard_pile)
-            agent.hand.append(drawn_card)
-            print(f"Agent{current_agent} dobrał kartę {drawn_card} ")
-        else:
+        card = next(c for c in agent.hand if c.index == action)
+        agent.hand.remove(card)
+        self.discard_pile.discard(card)
+        CardsEffects(self).realize_effects(card)
 
-            if isinstance(action, list):
-                for idx in action:
-                    card = next(c for c in agent.hand if c.index == idx)
-                    self.discard_pile.discard(card)
-                    agent.hand.remove(card)
-                    print(f"Agent{current_agent} zagrał kartę {card} ")
+    def render(self, mode='human'):
+        for agent in self.agents:
+            print(f"Agent {agent.agent_id} ma karty: {[str(card) for card in agent.hand]}")
+        print(f"Karta na stosie: {self.discard_pile.top_card()}")
+        print(f"Rozmiar talii: {len(self.deck.cards)}")
 
-            else:
-                card = next(c for c in agent.hand if c.index == action)
-                self.discard_pile.discard(card)
-                agent.hand.remove(card)
-                print(f"Agent{current_agent} zagrał kartę {card} ")
-
-            CardsEffects(self).realize_effects(card)
 
 if __name__ == "__main__":
     env = MacauEnv()
-    results = env.reset()
+    state_size = env.observation_space.shape[0]
+    action_size = env.action_space.n
+    agents = [DQNAgent(state_size, action_size) for _ in range(NUM_AGENTS)]
     done = False
+    batch_size = 32
 
-    for i in range(1):
-        print(f"Episode{i}\n")
-        while not done:
-            current_agent = env.current_agent
-            valid_action = env.valid_action_space(current_agent)
+    for e in range(NUM_EPISODES):
+        state = env.reset()
+        state = np.reshape(state, [1, state_size])
+        agent_indices = list(range(NUM_AGENTS))
 
-            action = random.choice(valid_action)
-
-            results = env.step(action)
-
-            observation = results[0]
-            rewards = results[1]
-            done = results[2]
-            info = results[3]
-
-            print(f"\nRęka agenta {current_agent}: {observation['agent_hand']} ")
-            print(f"Karta na środku: {observation['top_card']}\n___________________________________________\n\n")
-
+        for time in range(500):
+            current_agent_index = env.current_agent
+            current_agent = agents[current_agent_index]
+            valid_actions = env.valid_action_space(current_agent_index)
+            action = current_agent.act(state, valid_actions)
+            next_state, reward, done, _ = env.step(action)
+            next_state = np.reshape(next_state, [1, state_size])
+            current_agent.remember(state, action, reward, next_state, done)
+            state = next_state
             if done:
-                obs = env.reset()
+                print(f"Agent {current_agent_index} wygrał w epizodzie {e + 1}/{NUM_EPISODES} po {time + 1} krokach")
+                break
+            if len(current_agent.memory) > batch_size:
+                current_agent.replay(batch_size)
 
-#TODO zaimplementować sieć neuronową
+        if (e + 1) % 50 == 0:
+            for i, agent in enumerate(agents):
+                agent.save(f"macau-dqn-agent-{i}-{e + 1}.h5")
+
