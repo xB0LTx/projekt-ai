@@ -1,18 +1,23 @@
 import gymnasium as gym
 import numpy as np
 import random
+import os
 
 from stable_baselines3 import PPO
+from stable_baselines3 import A2C
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.vec_env import DummyVecEnv
 from gymnasium import spaces
 
 
 
+
 CARDS_PER_AGENT = 6
 NUM_AGENTS = 4
 NUM_EPISODES = 1000
-
+good = 0
+bad = 0
+draw = 0
 
 class Card:
     def __init__(self, index, value, suit):
@@ -98,7 +103,15 @@ class CardsEffects:
 
     def value_request(self):
         requested_value = self.macau_env.requested_value
-        
+
+        # value_to_indices = {}
+       #  for card in agent_hand:
+       #      if card.value not in value_to_indices:
+       #          value_to_indices[card.value] = []
+       #      value_to_indices[card.value].append(card.index)
+       #
+       #  requested_value = max(value_to_indices, key=lambda k: len(value_to_indices[k]))
+
         for i in range(1, NUM_AGENTS):
             current_agent_id = (self.macau_env.current_agent + i) % NUM_AGENTS
             agent_hand = self.macau_env.agents[current_agent_id].hand
@@ -139,7 +152,7 @@ class MacauEnv(gym.Env):
         self.requested_value = None
         self.requested_suit = None
 
-        self.action_space = spaces.MultiDiscrete([53, 7, 5])    # [(0-52), (0-5), (0-3)]
+        self.action_space = spaces.MultiDiscrete([53, 7, 5])  # [(0-52), (0-5), (0-3)]
         self.observation_space = spaces.Box(low=-1, high=52, shape=(53 * 3,), dtype=np.int32)
 
     def reset(self, seed=None):
@@ -165,18 +178,35 @@ class MacauEnv(gym.Env):
     def step(self, action):
         agent = self.agents[self.current_agent]
 
-        #   TODO   aby agetn korzytsał z maski legalnych akcji przy wyobrze akcji, na razie podejmuje randomowo poniżej
-        action2 = random.choice(self.valid_action_space(self.current_agent))
-        action_type, requested_value, requested_suit = action2
+        action_type, requested_value, requested_suit = action
+
+        correct = self.is_action_correct(action, agent)
+
+        if correct:
+            global good
+            good += 1
+            reward = 500000
+        else:
+            global bad
+            bad += 1
+            observation = self.get_observation(self.current_agent)
+            reward = -100000
+            terminated = False
+            truncated = False
+            info = {}
+            return observation, reward, terminated, truncated, info
+
 
         print(f"___________________________________________\nTura agenta {self.current_agent}")
-        
+
         print(f"\nRęka agenta przed turą:")
         for card in agent.hand:
             print(f"{card}")
         print("")
-        
+
         if action_type == 52:
+            global draw
+            draw =+ 1
             drawn_card = self.deck.draw_card(self.discard_pile)
             agent.hand.append(drawn_card)
             print(f"Agent {self.current_agent} dobral karte {drawn_card}")
@@ -199,12 +229,16 @@ class MacauEnv(gym.Env):
         print(f"\nTop_card: {self.discard_pile.top_card()}")
 
         done = len(agent.hand) == 0
-        reward = 20 if done else 0
+
+        if done:
+            reward += 50
+
         observation = self.get_observation(self.current_agent)
-        info = {'mask': self.get_action_mask(self.current_agent)}
-        self.current_agent = (self.current_agent + 1) % NUM_AGENTS
         terminated = done
         truncated = False
+        info = {'mask': self.get_action_mask(self.current_agent)}
+
+        self.current_agent = (self.current_agent + 1) % NUM_AGENTS
 
         return observation, reward, terminated, truncated, info
 
@@ -244,6 +278,25 @@ class MacauEnv(gym.Env):
         valid_actions.append([52, 0, 0])  # Dobranie karty
         return valid_actions
 
+    def is_action_correct(self, action, agent):
+        action_type, requested_value, requested_suit = action
+        valid_actions = self.valid_action_space(self.current_agent)
+
+        is_valid_action = any(
+            action[0] == valid_action[0] and
+            action[1] == valid_action[1] and
+            action[2] == valid_action[2]
+            for valid_action in valid_actions
+        )
+
+        additional_conditions = (
+            (action_type in [9, 22, 35, 48] and requested_value in [1, 2, 3, 4, 5, 6] and requested_suit == 0) or
+            (action_type in [12, 25, 38, 51] and requested_value == 0 and requested_suit in [1, 2, 3, 4]) or
+            (action_type in range(53) and action_type not in [9, 22, 35, 48, 12, 25, 38, 51] and requested_value == 0 and requested_suit == 0)
+        )
+
+        return is_valid_action and additional_conditions
+
     def get_action_mask(self, agent_index):
         valid_actions = self.valid_action_space(agent_index)
         mask = np.zeros(self.action_space.nvec, dtype=int)
@@ -253,12 +306,28 @@ class MacauEnv(gym.Env):
 
 
 if __name__ == "__main__":
+    models_dir = "models/A2C"
+    logdir = "logs"
+
+    if not os.path.exists((models_dir)):
+        os.makedirs((models_dir))
+
+    if not os.path.exists((logdir)):
+        os.makedirs((logdir))
+
     env = MacauEnv()
     check_env(env)
     vec_env = DummyVecEnv([lambda: MacauEnv()])
-    #   TODO zrobienie kilku modeli, każdy ze swoim "mózgiem"
-    model = PPO("MlpPolicy", vec_env, verbose=1)
-    model.learn(total_timesteps=10000)
-    #   TODO zapis modelu do pliku
+
+    #model = PPO("MlpPolicy", vec_env, verbose=1)
+    model = A2C("MlpPolicy", vec_env, verbose=1)
+
+    TIMESTEPS = 1000
+    for i in range (30):
+        model.learn(total_timesteps=TIMESTEPS, reset_num_timesteps=False, tb_log_name="A2C")
+        model.save(f"{models_dir}/{TIMESTEPS*i}")
+
+    print(f"\nAgent wybrał dobrą akcję {good} razy")
+    print(f"\nAgent wybrał złą akcję {bad} razy")
 
 
