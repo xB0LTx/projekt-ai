@@ -1,6 +1,13 @@
+import gymnasium as gym
+import numpy as np
 import random
-import gym
-from gym import spaces
+
+from stable_baselines3 import PPO
+from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.vec_env import DummyVecEnv
+from gymnasium import spaces
+
+
 
 CARDS_PER_AGENT = 6
 NUM_AGENTS = 4
@@ -22,8 +29,8 @@ class Deck:
         self.cards = self._create_deck()
 
     def _create_deck(self):
-        values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'As']
-        suits = ['Hearts', 'Diamonds', 'Clubs', 'Spades']
+        values = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        suits = [0, 1, 2, 3]
         deck = []
         for i, suit in enumerate(suits):
             for j, value in enumerate(values):
@@ -67,19 +74,19 @@ class CardsEffects:
         self.macau_env = macau_env
 
     def realize_effects(self, card):
-        if card.value == '2':
+        if card.value == 2:
             self.draw(2)
-        elif card.value == '3':
+        elif card.value == 3:
             self.draw(3)
-        elif card.value == '4':
+        elif card.value == 4:
             self.lose_turn()
-        elif card.value == 'J':
+        elif card.value == 11:
             self.value_request()
-        elif card.value == 'Q':
+        elif card.value == 12:
             self.make_uniwersal_card()
-        elif card.value == 'K' and card.suit in ['Spades', 'Hearts']:
+        elif card.value == 13 and card.suit in [1, 3]:
             self.draw(5)
-        elif card.value == 'As':
+        elif card.value == 14:
             self.change_suite()
 
     def draw(self, value):
@@ -90,18 +97,8 @@ class CardsEffects:
         self.macau_env.current_agent = (self.macau_env.current_agent + 1) % NUM_AGENTS
 
     def value_request(self):
-
-        current_agent_id = self.macau_env.current_agent
-        agent_hand = self.macau_env.agents[current_agent_id].hand
-
-        value_to_indices = {}
-        for card in agent_hand:
-            if card.value not in value_to_indices:
-                value_to_indices[card.value] = []
-            value_to_indices[card.value].append(card.index)
-
-        request_value = max(value_to_indices, key=lambda k: len(value_to_indices[k]))
-
+        requested_value = self.macau_env.requested_value
+        
         for i in range(1, NUM_AGENTS):
             current_agent_id = (self.macau_env.current_agent + i) % NUM_AGENTS
             agent_hand = self.macau_env.agents[current_agent_id].hand
@@ -140,22 +137,19 @@ class MacauEnv(gym.Env):
         self.agents = [Agent(agent_id, None, None) for agent_id in range(NUM_AGENTS)]
         self.current_agent = 0
         self.requested_value = None
+        self.requested_suit = None
 
-        self.action_space = spaces.Discrete(53 + 6)  # 52 karty + 1 dobranie karty + 6 wartosci (5-10)
-        self.observation_space = spaces.Dict({
-            'agent_hand': spaces.MultiDiscrete([52] * 52),
-            'top_card': spaces.MultiDiscrete([52]),
-            'opponent_hand_size': spaces.Discrete(52),
-            'deck_size': spaces.Discrete(52)
-        })
+        self.action_space = spaces.MultiDiscrete([53, 7, 5])    # [(0-52), (0-5), (0-3)]
+        self.observation_space = spaces.Box(low=-1, high=52, shape=(53 * 3,), dtype=np.int32)
 
-    def reset(self):
+    def reset(self, seed=None):
         self.deck = Deck()
         self.deck.shuffle()
         self.discard_pile = DiscardPile()
         self.agents = [Agent(agent_id, self.observation_space, self.action_space) for agent_id in range(NUM_AGENTS)]
         self.current_agent = 0
         self.requested_value = None
+        self.requested_suit = None
 
         self.deck.deal_cards(self.agents, self.discard_pile)
 
@@ -163,42 +157,74 @@ class MacauEnv(gym.Env):
         self.discard_pile.discard(initial_card)
 
         print(f"\nKarta poczatkowa: {initial_card}")
+        observation = self.get_observation(self.current_agent)
+        info = {'mask': self.get_action_mask(self.current_agent)}
 
-        return self.get_observation(self.current_agent)
+        return observation, info
 
     def step(self, action):
         agent = self.agents[self.current_agent]
 
-        print(f"___________________________________________\nTura agenta {self.current_agent}")
+        #   TODO   aby agetn korzytsał z maski legalnych akcji przy wyobrze akcji, na razie podejmuje randomowo poniżej
+        action2 = random.choice(self.valid_action_space(self.current_agent))
+        action_type, requested_value, requested_suit = action2
 
-        if isinstance(action, tuple):
-            card_action, requested_value_idx = action
-            self.requested_value = requested_value_idx - 48
-            print(f"Agent {self.current_agent} zada wartosci: {self.requested_value}")
-            self.make_action(card_action, agent)
-            #CardsEffects(self).value_request()
+        print(f"___________________________________________\nTura agenta {self.current_agent}")
+        
+        print(f"\nRęka agenta przed turą:")
+        for card in agent.hand:
+            print(f"{card}")
+        print("")
+        
+        if action_type == 52:
+            drawn_card = self.deck.draw_card(self.discard_pile)
+            agent.hand.append(drawn_card)
+            print(f"Agent {self.current_agent} dobral karte {drawn_card}")
         else:
-            self.make_action(action, agent)
+            card = next(c for c in agent.hand if c.index == action_type)
+            self.discard_pile.discard(card)
+            agent.hand.remove(card)
+            print(f"Agent {self.current_agent} zagral karte {card}")
+
+            if card.value == 11:
+                self.requested_value = requested_value
+            elif card.value == 14:
+                self.requested_suit = requested_suit
+
+            CardsEffects(self).realize_effects(card)
+
+        print(f"\nRęka agenta po turze:")
+        for card in agent.hand:
+            print(f"{card}")
+        print(f"\nTop_card: {self.discard_pile.top_card()}")
 
         done = len(agent.hand) == 0
         reward = 20 if done else 0
         observation = self.get_observation(self.current_agent)
-        info = {}
-
+        info = {'mask': self.get_action_mask(self.current_agent)}
         self.current_agent = (self.current_agent + 1) % NUM_AGENTS
+        terminated = done
+        truncated = False
 
-        return observation, reward, done, info
+        return observation, reward, terminated, truncated, info
 
     def get_observation(self, agent_index):
         agent_hand = self.agents[agent_index].hand
         top_card = self.discard_pile.top_card()
 
-        return {
-            'agent_hand': [(card.index, card.value, card.suit) for card in agent_hand],
-            'top_card': (top_card.index, top_card.value, top_card.suit) if top_card else None,
-            'opponent_hand_size': len(self.agents[(agent_index + 1) % NUM_AGENTS].hand),
-            'deck_size': len(self.deck.cards)
-        }
+        # Utwórz tablicę numpy o rozmiarze 53x3
+        observation = np.zeros((53, 3), dtype=np.int32)
+
+        # Wypełnij pierwsze 52 wiersze danymi z ręki agenta
+        for i, card in enumerate(agent_hand):
+            observation[i] = [card.index, card.value, card.suit]
+
+        # Wypełnij ostatnie 3 wiersze danymi z karty na wierzchu stosu odrzutów
+        if top_card:
+            observation[52] = [top_card.index, top_card.value, top_card.suit]
+
+        #   TODO sprawdzić czy te obserwacje będę wystarczające (hand i top_card)
+        return observation.flatten()
 
     def valid_action_space(self, agent_index):
         agent_hand = self.agents[agent_index].hand
@@ -206,77 +232,46 @@ class MacauEnv(gym.Env):
         valid_actions = []
 
         for card in agent_hand:
-            if top_card.value == 'Q' or card.value == 'Q' or card.value == top_card.value or card.suit == top_card.suit:
-                valid_actions.append(card.index)
-
-        value_to_indices = {}
-        for card in agent_hand:
-            if card.value not in value_to_indices:
-                value_to_indices[card.value] = []
-            value_to_indices[card.value].append(card.index)
-
-        for indices in value_to_indices.values():
-            if len(indices) > 1:
-                first_card = next(c for c in agent_hand if c.index == indices[0])
-                if top_card.value == 'Q' or first_card.value == 'Q' or first_card.value == top_card.value or first_card.suit == top_card.suit:
-                    valid_actions.append(indices)
-
-        if any(card.index in [9, 22, 35, 48] and (card.value == top_card.value or card.suit == top_card.suit) for card in agent_hand):
-            for idx in [9, 22, 35, 48]:
-                if idx in [card.index for card in agent_hand]:
-                    for value_action in range(53, 59):
-                        valid_actions.append((idx, value_action))
-
-        valid_actions.append("draw")
-
+            if card.value == top_card.value or card.suit == top_card.suit or top_card.value == 12 or card.value == 12:
+                if card.value == 11:  # Karty wymagające wyboru jednego z 6 efektów
+                    for value in range(6):
+                        valid_actions.append([card.index, value + 1, 0])
+                elif card.suit == 14:  # Karty wymagające wyboru jednego z 4 efektów
+                    for suit in range(4):
+                        valid_actions.append([card.index, 0, suit + 1])
+                else:
+                    valid_actions.append([card.index, 0, 0])
+        valid_actions.append([52, 0, 0])  # Dobranie karty
         return valid_actions
 
-    def make_action(self, action, agent):
-        if action == "draw":
-            drawn_card = self.deck.draw_card(self.discard_pile)
-            agent.hand.append(drawn_card)
-            print(f"Agent {self.current_agent} dobral karte {drawn_card}")
-        else:
-            if isinstance(action, list):
-                for idx in action:
-                    card = next(c for c in agent.hand if c.index == idx)
-                    self.discard_pile.discard(card)
-                    agent.hand.remove(card)
-                    print(f"Agent {self.current_agent} zagral karte {card}")
-            else:
-                card = next(c for c in agent.hand if c.index == action)
-                self.discard_pile.discard(card)
-                agent.hand.remove(card)
-                print(f"Agent {self.current_agent} zagral karte {card}")
+    def get_action_mask(self, agent_index):
+        valid_actions = self.valid_action_space(agent_index)
+        mask = np.zeros(self.action_space.nvec, dtype=int)
+        for action in valid_actions:
+            mask[action[0], action[1], action[2]] = 1
+        return mask
 
-            CardsEffects(self).realize_effects(card)
+
+class CustomMaskedPolicy(BaseFeaturesExtractor):
+    def __init__(self, observation_space, features_dim):
+        super(CustomMaskedPolicy, self).__init__(observation_space, features_dim)
+        self.net = nn.Sequential(
+            nn.Linear(observation_space.shape[0], 128),
+            nn.ReLU(),
+            nn.Linear(128, features_dim)
+        )
+
+    def forward(self, observations):
+        return self.net(observations)
 
 
 if __name__ == "__main__":
     env = MacauEnv()
-    results = env.reset()
-    done = False
-
-    for i in range(1):
-        print(f"Episode {i}\n")
-        while not done:
-            current_agent = env.current_agent
-            valid_action = env.valid_action_space(current_agent)
-
-            action = random.choice(valid_action)
-
-            results = env.step(action)
-
-            observation = results[0]
-            rewards = results[1]
-            done = results[2]
-            info = results[3]
-
-            print(f"\nReka agenta {current_agent}: {observation['agent_hand']} ")
-            print(f"Karta na srodku: {observation['top_card']}\n___________________________________________\n\n")
-
-            if done:
-                obs = env.reset()
-
+    check_env(env)
+    vec_env = DummyVecEnv([lambda: MacauEnv()])
+    #   TODO zrobienie kilku modeli, każdy ze swoim "mózgiem"
+    model = PPO("MlpPolicy", vec_env, verbose=1)
+    model.learn(total_timesteps=10000)
+    #   TODO zapis modelu do pliku
 
 
