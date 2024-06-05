@@ -252,19 +252,6 @@ class MacauEnv(gym.Env):
         return mask
 
 
-class CustomMaskedPolicy(BaseFeaturesExtractor):
-    def __init__(self, observation_space, features_dim):
-        super(CustomMaskedPolicy, self).__init__(observation_space, features_dim)
-        self.net = nn.Sequential(
-            nn.Linear(observation_space.shape[0], 128),
-            nn.ReLU(),
-            nn.Linear(128, features_dim)
-        )
-
-    def forward(self, observations):
-        return self.net(observations)
-
-
 if __name__ == "__main__":
     env = MacauEnv()
     check_env(env)
