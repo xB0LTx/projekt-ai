@@ -1,17 +1,19 @@
+import time
+
 import gymnasium as gym
 import numpy as np
 import random
 import os
-import matplotlib.pyplot as plt
-from stable_baselines3 import PPO, A2C
-from stable_baselines3.common.callbacks import EvalCallback
+
+import torch
+from stable_baselines3 import PPO
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.vec_env import DummyVecEnv
 from gymnasium import spaces
 
 
-CARDS_PER_AGENT = 7
-NUM_AGENTS = 5
+CARDS_PER_AGENT = 6
+NUM_AGENTS = 2
 NUM_EPISODES = 1000
 NUM_CARDS = 52
 NUM_SUITS = 4
@@ -21,9 +23,6 @@ good = 0
 bad = 0
 draw = 0
 reset_too_much = 0
-total_reward = 0
-ppo_episode_rewards = []
-a2c_episode_rewards = []
 
 
 class Card:
@@ -225,21 +224,20 @@ class MacauEnv(gym.Env):
 
         print(f"\nKarta poczatkowa: {initial_card}")
         observation = self.get_observation(self.current_agent)
-        info = {}
+        info = {'mask': self.get_action_mask(self.current_agent)}
 
         return observation, info
 
     def step(self, action):
         agent = self.agents[self.current_agent]
-        global total_reward
+
         print(f"___________________________________________\nTura agenta {self.current_agent}")
 
-        # print(f"\nRęka agenta przed turą:")
-        # for card in agent.hand:
-        #     print(f"{card}")
-        # print("")
-
-        if len(agent.hand) > 10:
+        print(f"\nRęka agenta przed turą:")
+        for card in agent.hand:
+            print(f"{card}")
+        print("")
+        if len(agent.hand) > 20:
             global reset_too_much
             reset_too_much += 1
             reward = -10000
@@ -249,21 +247,11 @@ class MacauEnv(gym.Env):
             info = {}
             return observation, reward, terminated, truncated, info
 
+
         if self.is_action_correct(action):  # legalna akcja
             global good
             good += 1
             reward = 100
-            if action in (0, 1, 13, 14, 26, 27, 39, 40):#+2/+3
-                reward+=100
-            elif action in (11, 37):#+5
-                reward+=200
-            elif action in (2, 15, 28, 41):#skip
-                reward += 50
-            elif action in (12, 25, 38, 51):#AS
-                reward +=25
-            elif action in (9, 22, 35, 48):#WALET
-                reward+=150
-
             if action == 52:
                 drawn_card = self.deck.draw_card(self.discard_pile)
                 agent.hand.append(drawn_card)
@@ -286,10 +274,10 @@ class MacauEnv(gym.Env):
             info = {'mask': self.get_action_mask(self.current_agent)}
             return observation, reward, terminated, truncated, info
 
-        # print(f"\nRęka agenta po turze:")
-        # for card in agent.hand:
-        #     print(f"{card}")
-        # print(f"\nTop_card: {self.discard_pile.top_card()}")
+        print(f"\nRęka agenta po turze:")
+        for card in agent.hand:
+            print(f"{card}")
+        print(f"\nTop_card: {self.discard_pile.top_card()}")
 
         done = len(agent.hand) == 0
 
@@ -299,11 +287,9 @@ class MacauEnv(gym.Env):
         observation = self.get_observation(self.current_agent)
         terminated = done
         truncated = False
-        info = {}
+        info = {'mask': self.get_action_mask(self.current_agent)}
 
         self.current_agent = (self.current_agent + 1) % NUM_AGENTS
-
-        total_reward += reward
 
         return observation, reward, terminated, truncated, info
 
@@ -348,102 +334,25 @@ class MacauEnv(gym.Env):
         return correct
 
 
-def make_env():
-    return MacauEnv()
-
-
 if __name__ == "__main__":
-    # Ścieżki do katalogów z modelami
-    ppo_models_dir = "models/PPO"
-    a2c_models_dir = "models/A2C"
+    models_dir = f"models/PPO"
+    logdir = f"logs/PPO"
 
-    # Tworzenie katalogów, jeśli nie istnieją
-    os.makedirs(ppo_models_dir, exist_ok=True)
-    os.makedirs(a2c_models_dir, exist_ok=True)
+    if not os.path.exists(models_dir):
+        os.makedirs(models_dir)
 
-    # Ścieżki do najlepszych modeli
-    ppo_model_path = os.path.join(ppo_models_dir, 'ppo_model')
-    a2c_model_path = os.path.join(a2c_models_dir, 'a2c_model')
+    if not os.path.exists(logdir):
+        os.makedirs(logdir)
 
-    # PPO
-    if os.path.exists(ppo_model_path + ".zip"):
-        print("Loading existing PPO model...")
-        ppo_model = PPO.load(ppo_model_path)
-        ppo_env = DummyVecEnv([make_env])
-        ppo_model.set_env(ppo_env)
-    else:
-        print("Creating new PPO model...")
-        ppo_env = DummyVecEnv([make_env])
-        ppo_model = PPO('MlpPolicy', ppo_env, verbose=1)
+    env = MacauEnv()
+    check_env(env)
+    vec_env = DummyVecEnv([lambda: env])
+    model = PPO('MlpPolicy', vec_env, verbose=1, tensorboard_log=logdir)
 
-    # Callback do ewaluacji i zapisywania najlepszego modelu PPO
-    eval_callback_ppo = EvalCallback(ppo_env, best_model_save_path=ppo_models_dir,
-                                     log_path=ppo_models_dir, eval_freq=10000,
-                                     deterministic=True, render=False)
+    TIMESTEPS = 1000
+    for i in range(1, 200):
+        model.learn(total_timesteps=TIMESTEPS, reset_num_timesteps=False, tb_log_name="PPO")
+        model.save(f"{models_dir}/{TIMESTEPS * i}")
 
-    # A2C
-    if os.path.exists(a2c_model_path + ".zip"):
-        print("Loading existing A2C model...")
-        a2c_model = A2C.load(a2c_model_path)
-        a2c_env = DummyVecEnv([make_env])
-        a2c_model.set_env(a2c_env)
-    else:
-        print("Creating new A2C model...")
-        a2c_env = DummyVecEnv([make_env])
-        a2c_model = A2C('MlpPolicy', a2c_env, verbose=1)
-
-    # Callback do ewaluacji i zapisywania najlepszego modelu A2C
-    eval_callback_a2c = EvalCallback(a2c_env, best_model_save_path=a2c_models_dir,
-                                     log_path=a2c_models_dir, eval_freq=10000,
-                                     deterministic=True, render=False)
-
-    # Trenowanie modelu PPO
-    TIMESTEPS = 1  # Ustaw właściwą liczbę kroków
-    ppo_episode_rewards = []
-    for i in range(20):
-        ppo_model.learn(total_timesteps=TIMESTEPS, reset_num_timesteps=False)
-        ppo_model.save(ppo_model_path)
-
-        ppo_episode_rewards.append(total_reward)
-        print(f"Agent PPO podejmuje złą akcje {bad} razy")
-        print(f"Agent PPO podejmuje dobrą akcje {good} razy")
-        print(f"Agent PPO zresetował środowisko z powodu zbyt wielu kart na ręce {reset_too_much} razy")
-        total_reward = 0  # Przykład, dostosuj do swoich potrzeb
-        bad = 0
-        good = 0
-        reset_too_much = 0
-
-    # Trenowanie modelu A2C
-    TIMESTEPS = 2048 # Ustaw właściwą liczbę kroków
-    a2c_episode_rewards = []
-    for i in range(20):
-        a2c_model.learn(total_timesteps=TIMESTEPS, reset_num_timesteps=False)
-        a2c_model.save(a2c_model_path)
-
-        a2c_episode_rewards.append(total_reward)
-        print(f"Agent A2C podejmuje złą akcje {bad} razy")
-        print(f"Agent A2C podejmuje dobrą akcje {good} razy")
-        print(f"Agent A2C zresetował środowisko z powodu zbyt wielu kart na ręce {reset_too_much} razy")
-        total_reward = 0  # Przykład, dostosuj do swoich potrzeb
-        bad = 0
-        good = 0
-        reset_too_much = 0
-
-    # Wykres nagród
-    plt.plot(ppo_episode_rewards, label='PPO')
-    plt.plot(a2c_episode_rewards, label='A2C')
-    plt.xlabel('Episode')
-    plt.ylabel('Total Reward')
-    plt.title('Total Reward per Episode')
-    plt.grid(True)
-    plt.legend(['PPO', 'A2C'])
-    plt.xticks(range(20))
-    plt.show()
-
-    #TODO wykresy:
-    # 1. ten co jest
-    # 2. zmiany średniej nagrody w czasie trwania pętli
-    # 3. bad i good
-    # 4. funkcja straty i jej pokazanie
-    # 5. intrefejs prosty
-
+    print(f"\nAgent wybrał dobrą akcję {good} razy")
+    print(f"\nAgent wybrał złą akcję {bad} razy")
